@@ -1,0 +1,162 @@
+---
+layout: post
+title: Socket
+---
+
+##BIO blocking
+When using BufferedReader for inputStream of socket, note that readline method will block until line sep has been reached or client socket close.
+the end of the stream has been reached in BufferedReader's javadoc mean that client socket closed in socket situation. See http://stackoverflow.com/questions/6139834/sockets-bufferedreader-readline-blocks
+
+the same to all read operation.所有的读操作都一样，在socket中，如果从client中读取，会一直堵塞到读取到下一个字节或者流关闭（socket关闭）。
+See ： http://stackoverflow.com/questions/5562370/how-to-identify-end-of-inputstream-in-java
+```java
+static void startBlockServer(int port) throws IOException {
+    ServerSocket socket = new ServerSocket(port);
+    while (true) {
+        //accept connection
+        Socket client = socket.accept();
+        System.out.println("Accepted connection from " + client);
+        //input stream reader with buffer.
+        BufferedReader reader = new BufferedReader(new InputStreamReader(client.getInputStream()));
+        //if use BufferedReader.readLine(), client must send string contains line sep ,
+        //else will block until client socket closed.
+        //the end of the stream has been reached in javadoc mean that client socket closed.
+        //so, readLine will be blocking after reading the last line using while loop , until client socket has been closed.
+        OutputStreamWriter writer = new OutputStreamWriter(new BufferedOutputStream(client.getOutputStream()));
+        String line;
+        StringBuilder sb = new StringBuilder();
+        while ((line = reader.readLine()) != null) { //readLine will be blocking after reading the last line ,until client socket has been closed.
+            System.out.println(line);
+            sb.append(line);
+        }
+        System.out.println("from client:" + sb);
+        writer.write("Hello from server");
+        writer.flush();
+        writer.close();
+        reader.close();
+        client.close();
+    }
+}
+```
+
+##Blocking IO
+server :
+```java
+static void startBlockServer(int port) throws IOException {
+    ServerSocket socket = new ServerSocket(port);
+    try{
+        while (true) {
+            //accept connection
+            Socket client = socket.accept();
+            System.out.println("Accepted connection from " + client);
+            //input stream reader with buffer.
+            BufferedReader reader = new BufferedReader(new InputStreamReader(client.getInputStream()));
+            PrintWriter writer = new PrintWriter(client.getOutputStream());
+            writer.println("hello "+ reader.readLine());
+            writer.flush();
+            writer.close();
+            reader.close();
+            client.close();
+        }
+    } finally {
+        socket.close();
+    }
+}
+```
+When listening a port will block until client connect to.
+```java
+Socket client = socket.accept();//will block until accepting a connection.
+```
+
+the call to `reader.readLine()` blocks until next line was received or the other end socket is closed(disconnect).
+
+client:
+```java
+private static void connect() {
+    try {
+        Socket socket = new Socket("127.0.0.1", 8999);
+        //real output stream
+        OutputStream outputStream = socket.getOutputStream();
+        BufferedOutputStream buffer = new BufferedOutputStream(outputStream);
+        PrintWriter write = new PrintWriter(buffer , true);
+        write.println("simon");
+        BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+        String readStr = reader.readLine();
+        System.out.println("from server:" + readStr);
+        write.close();
+        reader.close();
+        socket.close();
+
+    } catch (Exception e) {
+        System.out.println(e);
+    }
+}
+```
+
+
+##NON-Blocking server:
+```java
+static void startNIOServer() throws IOException {
+    ServerSocketChannel server = ServerSocketChannel.open();
+    Selector selector = Selector.open();
+    server.configureBlocking(false);
+    SocketAddress address = new InetSocketAddress(8999);
+    server.bind(address);
+    server.register(selector, SelectionKey.OP_ACCEPT);
+    while (true) {
+        selector.select();
+        Iterator<SelectionKey> iterator = selector.selectedKeys().iterator();
+        while (iterator.hasNext()) {
+            SelectionKey key = iterator.next();
+            iterator.remove();
+            if (key.isAcceptable()) {
+                SocketChannel socketChannel = server.accept();
+                System.out.println("connected from" + socketChannel);
+                socketChannel.configureBlocking(false);
+                socketChannel.register(selector, SelectionKey.OP_READ);
+            } else if (key.isReadable()) {
+                SocketChannel socketChannel = (SocketChannel) key.channel();
+                ByteBuffer buffer = ByteBuffer.allocate(1024);
+                int readCount;
+                socketChannel.read(buffer);
+                while ((readCount = socketChannel.read(buffer)) > 0) {
+                    buffer.flip();
+                    byte[] array = buffer.array();
+                    String res = new String(array);
+                    System.out.println(res);
+                    buffer.clear();
+                    buffer.put("hello \n".getBytes());
+                    buffer.flip();
+                    socketChannel.write(buffer);
+                    buffer.clear();
+                }
+            }
+        }
+    }
+}
+```
+NIO is based on two concepts, channels and buffers. Channels are roughly analogous to streams used in the stream model. Buffers do not have a precise analog in the stream model.
+The basic streams, InputStream and OutputStream, can read and write bytes; subclasses of these stream classes can read and write other kinds of data. In NIO, all data is read and written via buffers. See Figure 1 for a comparison of the two models.
+
+1. A `Buffer` contains data in a linear sequence for reading or writing. A special buffer provides for memory-mapped file I/O.
+2. A `Charset` maps Unicode character strings to and from byte sequences. (Yes,  this is Java's third shot at character conversion.)
+3. `Channel`s -- which can be sockets, files, or pipes -- represent a bidirectional communication pipe.
+4. `Selector`s multiplex asynchronous I/O operations into one or more threads.
+
+
+###Channel
+Notice that while the stream model distinguishes between InputStreams and OutputStreams, NIO uses one kind of object—a Channel—for both. 
+###Buffer
+Buffer is bideriction.
+###Selector
+http://unixhelp.ed.ac.uk/CGI/man-cgi?select+2
+only `SelectableChannel` can be regist to selectors.
+Reactor allows applications to decouple event arrival from event handling. Events arrive at arbitrary times but are not immediately dispatched. Instead, a Reactor keeps track of the events until the handlers ask for them.
+
+The select facility works differently. With select you register many input streams with a Selector object. When I/O activity happens on any of the streams, the Selector tells you. This way, it's possible to read from a large number of data sources from a single thread. Note also that Selectors don't just help you read data; they can also listen for incoming network connections and write data across slow channels.
+
+As discussed earlier, the select I/O model is essentially event-driven. All of your input sources are registered with a single Selector object, which waits for activity on any of the input sources. This model differs from the stream model, but it's still a solid model. In fact, in the larger scheme of things, it's generally more correct to think of the stream model as a layer that runs on top of the select model. At the hardware level, I/O is fundamentally event-driven, since peripherals such as network cards, keyboards, and some disk drives send their data without warning.
+    
+**[Reactor Pattern White paper](http://www.dre.vanderbilt.edu/~schmidt/PDF/reactor-siemens.pdf)**
+
+[Reactor pattern in wiki](http://en.wikipedia.org/wiki/Reactor_pattern)
